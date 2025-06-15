@@ -13,6 +13,9 @@ from utils.common_utils import CommonUtils
 from utils.mask_dictionary_model import MaskDictionaryModel, ObjectInfo
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
+import rospy
+from sensor_msgs.msg import Image as ROSImage
+from cv_bridge import CvBridge
 
 # Setup environment
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
@@ -474,6 +477,10 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Initialize ROS node
+    rospy.init_node('grounded_sam2_tracker', anonymous=True)
+    bridge = CvBridge()
+    
     # Initialize the object tracker
     tracker = IncrementalObjectTracker(
         grounding_model_id="IDEA-Research/grounding-dino-tiny",
@@ -483,23 +490,20 @@ def main():
         prompt_text=prompt_text,
         detection_interval=detection_interval,
     )
-    tracker.set_prompt("person.")
+    tracker.set_prompt("bag.")
 
-    # Open the camera (or replace with local video file, e.g., cv2.VideoCapture("video.mp4"))
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[Error] Cannot open camera.")
-        return
-
-    print("[Info] Camera opened. Press 'q' to quit.")
+    print("[Info] Waiting for camera feed...")
     frame_idx = 0
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[Warning] Failed to capture frame.")
-                break
+        while not rospy.is_shutdown():
+            # Get the latest image from the camera topic
+            try:
+                msg = rospy.wait_for_message('/hsrb/head_rgbd_sensor/rgb/image_raw', ROSImage, timeout=1.0)
+                frame = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            except rospy.ROSException:
+                print("[Warning] No camera message received.")
+                continue
 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             print(f"[Frame {frame_idx}] Processing live frame...")
@@ -510,25 +514,16 @@ def main():
                 frame_idx += 1
                 continue
 
-            # process_image_bgr = cv2.cvtColor(process_image, cv2.COLOR_RGB2BGR)
-            # cv2.imshow("Live Inference", process_image_bgr)
-
-            
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     print("[Info] Quit signal received.")
-            #     break
-
             tracker.save_current_state(output_dir=output_dir, raw_image=frame_rgb)
             frame_idx += 1
 
             if frame_idx >= max_frames:
                 print(f"[Info] Reached max_frames {max_frames}. Stopping.")
                 break
+
     except KeyboardInterrupt:
         print("[Info] Interrupted by user (Ctrl+C).")
     finally:
-        cap.release()
-        cv2.destroyAllWindows()
         print("[Done] Live inference complete.")
 
 
